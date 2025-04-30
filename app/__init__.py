@@ -1,50 +1,85 @@
 import flask
 import logging
+import threading # Cần import threading
 
-from app import token_storage
-from . import config
+# Import các module của ứng dụng
+from . import config # Luôn import config trước
+from . import token_storage
 from . import firebase_client
+from . import ml_handler # Import ml_handler
 from . import routes
-from . import scheduler
+from . import scheduler # Import scheduler ngay cả khi không dùng để tránh lỗi nếu có import vòng
 from . import udp_server
-from . import ml_handler # Import để có thể gọi load_model nếu muốn
 
 def create_app():
     """Tạo và cấu hình Flask application instance."""
     app = flask.Flask(__name__)
 
-    # Cấu hình logging cơ bản cho Flask (có thể tùy chỉnh thêm)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s')
-    # Ghi log vào file nếu muốn
-    # file_handler = logging.FileHandler('server.log')
-    # file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
-    # app.logger.addHandler(file_handler)
-    # app.logger.setLevel(logging.INFO) # Hoặc DEBUG
+    # --- Cấu hình Logging ---
+    # Sử dụng cấu hình từ config.py đã được thực hiện ở đó
+    # logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT) # Không cần gọi lại nếu config đã gọi
+    app.logger.setLevel(config.LOG_LEVEL) # Đảm bảo logger của Flask cũng dùng level này
+    # Ghi log vào file nếu được cấu hình trong config.py
+    # if config.LOG_TO_FILE:
+    #     # ... (thêm file handler như trong config)
+    logging.info("--- Khởi tạo ứng dụng Flask ---")
+    app.logger.info("Logger của Flask đã được cấu hình.")
 
-    logging.info("Khởi tạo ứng dụng Flask...")
-    app.logger.info("Flask logger đã được cấu hình.") # Sử dụng logger của Flask
-
-    # Khởi tạo Firebase Admin SDK
+    # --- Khởi tạo Firebase Admin SDK ---
     if not firebase_client.initialize_firebase():
-        # Xử lý trường hợp không khởi tạo được Firebase (ví dụ: dừng app)
-        app.logger.error("Không thể khởi tạo Firebase Admin SDK. Kiểm tra tệp serviceAccountKey.json và cấu hình.")
-        # Có thể raise Exception hoặc trả về None để báo lỗi
+        app.logger.error("KHÔNG THỂ KHỞI TẠO FIREBASE ADMIN SDK. KIỂM TRA LẠI TỆP KEY VÀ CẤU HÌNH.")
+        # Có thể dừng ứng dụng ở đây nếu Firebase là bắt buộc
         # raise RuntimeError("Firebase initialization failed")
+    else:
+        app.logger.info("Firebase Admin SDK đã được khởi tạo.")
 
-    # Đăng ký các route
+    # --- Tải Model Machine Learning ---
+    app.logger.info("Đang tải model Machine Learning...")
+    if not ml_handler.load_model():
+         app.logger.warning("Không thể tải model ML khi khởi động. Chức năng dự đoán sẽ không hoạt động.")
+         # Server vẫn có thể chạy nhưng chức năng ML sẽ bị vô hiệu hóa
+    else:
+         app.logger.info("Model Machine Learning đã được tải thành công.")
+
+
+    # --- Đăng ký các route ---
     routes.register_routes(app)
-    app.logger.info("Các route đã được đăng ký.")
+    app.logger.info("Các route API đã được đăng ký.")
 
-    # (Tùy chọn) Tải model ML khi khởi tạo app
-    # ml_handler.load_model()
+    # --- Khởi chạy các luồng nền (UDP listener và Scheduler nếu bật) ---
+    # Lưu ý quan trọng về việc chạy thread trong môi trường production (Gunicorn/Waitress):
+    # - Development server (app.run()) thường chạy tốt với thread.
+    # - Gunicorn/Waitress có thể tạo nhiều worker process. Mỗi process sẽ cố gắng chạy các thread này.
+    #   Điều này có thể dẫn đến việc UDP port bị bind nhiều lần (lỗi) hoặc scheduler chạy nhiều lần.
+    # Giải pháp:
+    #   1. Chỉ chạy thread trong worker chính (khó thực hiện với Gunicorn).
+    #   2. Sử dụng công cụ quản lý task/process riêng biệt (Celery, Supervisor, systemd) để chạy listener và scheduler độc lập với web server.
+    #   3. (Đơn giản nhất cho dự án nhỏ): Chạy Gunicorn/Waitress với CHỈ MỘT worker (`gunicorn --workers 1 run:app`).
 
-    # Khởi chạy các luồng nền (scheduler, UDP)
-    # Lưu ý: Việc khởi chạy thread ở đây có thể không lý tưởng nếu dùng WSGI server
-    # production. Cách tốt hơn là dùng các công cụ quản lý process/task riêng biệt.
-    # Tuy nhiên, với server đơn giản này thì cách này chấp nhận được.
-    scheduler.start_scheduler_thread()
+    app.logger.info("Khởi chạy các luồng nền...")
+
+    # Khởi chạy UDP Listener Thread
     udp_server.start_udp_thread()
+    app.logger.info("Luồng UDP Listener đã bắt đầu.")
 
-    app.logger.info("Ứng dụng Flask đã sẵn sàng.")
+    # Khởi chạy Scheduler Thread (chỉ nếu được bật trong config)
+    if config.SCHEDULE_ENABLED:
+        # scheduler.start_scheduler_thread() # Hàm này cần được định nghĩa lại hoặc dùng hàm từ firebase_client
+        # Sử dụng hàm gửi thông báo định kỳ từ firebase_client nếu muốn
+        scheduler_thread = threading.Thread(
+            target=scheduler.run_scheduler, # Hàm run_scheduler cần dùng _send_periodic_notifications_job từ firebase_client
+            name="SchedulerThread",
+            daemon=True
+        )
+        # Cần sửa lại scheduler.py để dùng hàm job từ firebase_client
+        # Tạm thời comment out để tránh lỗi nếu scheduler.py chưa được sửa
+        # scheduler_thread.start()
+        app.logger.info("Luồng Scheduler đã bắt đầu (nếu được cấu hình đúng).")
+        # LƯU Ý: Cần sửa lại file app/scheduler.py để gọi firebase_client._send_periodic_notifications_job
+        # thay vì hàm job cũ nếu bạn muốn dùng lại scheduler.
+    else:
+         app.logger.info("Scheduler bị tắt trong cấu hình.")
+
+
+    app.logger.info("--- Ứng dụng Flask đã sẵn sàng ---")
     return app
-

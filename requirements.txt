@@ -1,4 +1,17 @@
+# Flask và các thành phần web server
 Flask>=2.0
+gunicorn # Hoặc waitress, cho production
+
+# Firebase
 firebase-admin>=6.0
+
+# Scheduler (nếu vẫn dùng thông báo định kỳ)
 schedule>=1.0
-gunicorn
+
+# Machine Learning và Audio Processing
+torch>=1.9
+torchaudio>=0.9
+torchvision>=0.10
+numpy>=1.19
+Pillow>=8.0
+matplotlib>=3.3
