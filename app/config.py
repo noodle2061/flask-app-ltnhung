@@ -15,7 +15,7 @@ SERVICE_ACCOUNT_KEY_PATH = os.path.join(os.path.dirname(BASE_DIR), 'nhandientien
 # --- Cấu hình Server ---
 # Địa chỉ IP và cổng cho Flask server (HTTP)
 FLASK_HOST = "0.0.0.0"  # Lắng nghe trên tất cả các interface
-FLASK_PORT = 80         # Cổng HTTP chuẩn
+FLASK_PORT = 5000         # Cổng HTTP chuẩn
 
 # --- Cấu hình UDP (Placeholder) ---
 UDP_HOST = "0.0.0.0"
