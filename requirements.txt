@@ -1,0 +1,4 @@
+Flask>=2.0
+firebase-admin>=6.0
+schedule>=1.0
+gunicorn
