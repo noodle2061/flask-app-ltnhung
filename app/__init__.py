@@ -8,7 +8,7 @@ from . import token_storage
 from . import firebase_client
 from . import ml_handler # Import ml_handler
 from . import routes
-from . import scheduler # Import scheduler ngay cả khi không dùng để tránh lỗi nếu có import vòng
+# from . import scheduler # Import scheduler ngay cả khi không dùng để tránh lỗi nếu có import vòng
 from . import udp_server
 
 def create_app():

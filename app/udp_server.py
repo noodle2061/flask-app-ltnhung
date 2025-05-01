@@ -78,9 +78,12 @@ def _process_audio_data(data_bytes, client_address):
                      _buffer_lock.acquire()
 
 
-                if prediction is not None:
+                # --- THAY ĐỔI Ở ĐÂY ---
+                # Chỉ ghi log nếu là tiếng hét hoặc dự đoán bị lỗi (None)
+                if prediction == 'Hét' or prediction is None:
                     logging.info(f"UDP Server: Dự đoán từ {client_ip} - Kết quả: {prediction} ({confidence*100:.1f}%)")
 
+                if prediction is not None:
                     # 6. Kiểm tra nếu là tiếng hét và gửi thông báo (nếu không trong cooldown)
                     if prediction == 'Hét':
                         current_time = time.time()
@@ -100,8 +103,9 @@ def _process_audio_data(data_bytes, client_address):
                                 logging.error(f"UDP Server: Gửi cảnh báo tiếng hét từ {client_ip} thất bại.")
                         else:
                             logging.info(f"UDP Server: Phát hiện tiếng hét từ {client_ip} nhưng đang trong thời gian cooldown. Bỏ qua gửi thông báo.")
-                else:
-                    logging.warning(f"UDP Server: Dự đoán từ {client_ip} trả về None hoặc lỗi.")
+                # Không cần else ở đây vì trường hợp 'Không hét' đã được bỏ qua ở phần log phía trên
+                # else: # prediction is None
+                #     logging.warning(f"UDP Server: Dự đoán từ {client_ip} trả về None hoặc lỗi.") # Log này đã được xử lý ở trên
 
             # Kết thúc vòng lặp while, buffer có thể còn dữ liệu chưa đủ chunk
 

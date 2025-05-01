@@ -1,5 +1,6 @@
-from app import create_app, config, scheduler, udp_server # Import các thành phần cần thiết
+from app import create_app, config,  udp_server # Import các thành phần cần thiết
 import logging
+# import scheduler
 import signal
 import sys
 import time
@@ -11,7 +12,7 @@ def shutdown_server(signum, frame):
     """Hàm xử lý tín hiệu dừng server (Ctrl+C)."""
     logging.info("Nhận tín hiệu dừng (Ctrl+C)... Đang dọn dẹp.")
     # Dừng các luồng nền
-    scheduler.stop_scheduler()
+    # scheduler.stop_scheduler()
     udp_server.stop_udp_listener()
     # Đợi các luồng kết thúc (tùy chọn, có thể cần join)
     logging.info("Đã yêu cầu dừng các luồng nền.")
@@ -43,4 +44,3 @@ if __name__ == '__main__':
     finally:
         # Đoạn này có thể không được chạy nếu dùng sys.exit() trong signal handler
         logging.info("Server đã dừng hoàn toàn.")
-

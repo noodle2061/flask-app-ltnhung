@@ -3,6 +3,12 @@ import os
 import io
 import time # Thêm import time
 
+# --- THÊM VÀO ĐÂY ---
+# Chỉ định backend không tương tác cho Matplotlib TRƯỚC khi import pyplot
+import matplotlib
+matplotlib.use('Agg') # Sử dụng backend 'Agg' để tránh lỗi GUI trong thread phụ
+# --------------------
+
 import torch
 import torchaudio
 import torchvision # Cần import torchvision để load model ResNet
@@ -135,6 +141,7 @@ def _audio_chunk_to_image_tensor(audio_chunk_tensor):
 
         # Tạo ảnh từ matplotlib để có colormap 'viridis'
         # Tạo figure và axes mới mỗi lần để tránh vấn đề thread-safety của matplotlib
+        # Dòng này sẽ không còn gây warning vì đã set backend 'Agg'
         fig, ax = plt.subplots(1, figsize=(config.MODEL_IMG_SIZE[1]/100, config.MODEL_IMG_SIZE[0]/100), dpi=100)
         fig.subplots_adjust(left=0, right=1, bottom=0, top=1) # Bỏ viền trắng
         ax.axis('off') # Tắt trục
@@ -210,6 +217,7 @@ def predict_scream(audio_chunk_tensor):
 
         end_time = time.time()
         processing_time = end_time - start_time
+        # Log này vẫn giữ nguyên, bạn có thể điều chỉnh nếu muốn
         logging.debug(f"ML Handler: Dự đoán hoàn tất trong {processing_time:.4f}s - Kết quả: {prediction_label} ({confidence*100:.1f}%)")
 
         # Chỉ trả về kết quả nếu là 'Hét' hoặc 'Không hét' (có thể tùy chỉnh)
