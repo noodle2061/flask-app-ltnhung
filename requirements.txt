@@ -1,5 +1,5 @@
 # requirements.txt (phiên bản cho EC2 CPU)
---index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch>=1.9 # Pip sẽ tự tìm bản CPU từ index-url trên
 torchaudio>=0.9
 torchvision>=0.10
