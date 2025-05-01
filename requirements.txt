@@ -1,9 +1,12 @@
-Flask>=2.0
-firebase-admin>=6.0
-schedule>=1.0
-torch>=1.9
+# requirements.txt (phiên bản cho EC2 CPU)
+--index-url https://download.pytorch.org/whl/cpu
+torch>=1.9 # Pip sẽ tự tìm bản CPU từ index-url trên
 torchaudio>=0.9
 torchvision>=0.10
+# Các thư viện khác
+Flask>=2.0
+firebase-admin>=6.0
 numpy>=1.19
 Pillow>=8.0
 matplotlib>=3.3
+# schedule>=1.0 # Bỏ đi nếu không dùng
