@@ -9,5 +9,8 @@ firebase-admin>=6.0
 numpy>=1.19
 Pillow>=8.0
 matplotlib>=3.3
-dotenv>=0.19
+python-dotenv>=0.19
+# Thêm thư viện cho S3 và xử lý WAV
+boto3>=1.17 # Cho AWS S3
+soundfile>=0.10 # Để lưu tensor thành file WAV trong bộ nhớ
 # schedule>=1.0 # Bỏ đi nếu không dùng
