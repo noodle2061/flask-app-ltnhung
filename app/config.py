@@ -35,6 +35,16 @@ else:
     logging.warning("Biến môi trường FIREBASE_SERVICE_ACCOUNT_KEY_PATH không được đặt. Sử dụng đường dẫn mặc định (có thể không an toàn).")
     # Hoặc raise Exception("FIREBASE_SERVICE_ACCOUNT_KEY_PATH environment variable not set.")
 
+# === THÊM MỚI: Đọc URL của Realtime Database ===
+FIREBASE_DATABASE_URL = os.getenv('FIREBASE_DATABASE_URL')
+if not FIREBASE_DATABASE_URL:
+    logging.error("Biến môi trường FIREBASE_DATABASE_URL chưa được đặt trong file .env!")
+    # Có thể raise Exception ở đây nếu database là bắt buộc
+    # raise ValueError("FIREBASE_DATABASE_URL environment variable not set.")
+else:
+    logging.info(f"Sử dụng Firebase Database URL: {FIREBASE_DATABASE_URL}")
+# ===========================================
+
 # --- Cấu hình Server ---
 # Đọc từ biến môi trường hoặc dùng giá trị mặc định
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
@@ -125,4 +135,7 @@ else:
 
 if not SERVICE_ACCOUNT_KEY_PATH_ENV:
      logging.warning("Firebase Key Path đang sử dụng giá trị mặc định trong code.")
+
+if not FIREBASE_DATABASE_URL:
+     logging.error("Firebase Database URL chưa được cấu hình trong .env!")
 

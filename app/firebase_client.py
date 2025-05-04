@@ -1,8 +1,8 @@
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, db # Thêm 'db'
 import logging
 import os
-import time # Thêm import time
+import time
 
 # Import cấu hình và quản lý token
 from . import config
@@ -10,39 +10,46 @@ from . import token_storage # Cần truy cập token_storage để lấy danh s�
 
 _firebase_initialized = False
 _cred = None
+_db_ref = None # Tham chiếu đến root của Realtime Database
 
 def initialize_firebase():
-    """Khởi tạo Firebase Admin SDK."""
-    global _firebase_initialized, _cred
+    """Khởi tạo Firebase Admin SDK cho cả FCM và Realtime Database."""
+    global _firebase_initialized, _cred, _db_ref
     if _firebase_initialized:
         logging.info("Firebase Client: Firebase Admin SDK đã được khởi tạo trước đó.")
         return True
 
+    # Kiểm tra cả Service Account Key và Database URL
     if not os.path.exists(config.SERVICE_ACCOUNT_KEY_PATH):
         logging.error(f"Firebase Client: Lỗi: Không tìm thấy tệp Service Account Key tại '{config.SERVICE_ACCOUNT_KEY_PATH}'.")
-        logging.error("Firebase Client: Vui lòng tải tệp key từ Firebase Console và đặt đúng đường dẫn trong config.py.")
         return False
-    else:
-        try:
-            _cred = credentials.Certificate(config.SERVICE_ACCOUNT_KEY_PATH)
-            firebase_admin.initialize_app(_cred)
-            _firebase_initialized = True
-            logging.info("Firebase Client: Firebase Admin SDK đã được khởi tạo thành công.")
-            return True
-        except Exception as e:
-            logging.error(f"Firebase Client: Lỗi khi khởi tạo Firebase Admin SDK: {e}", exc_info=True)
-            return False
+    if not config.FIREBASE_DATABASE_URL:
+        logging.error("Firebase Client: Lỗi: FIREBASE_DATABASE_URL chưa được cấu hình trong .env.")
+        return False
+
+    try:
+        _cred = credentials.Certificate(config.SERVICE_ACCOUNT_KEY_PATH)
+        # Thêm databaseURL vào options khi khởi tạo
+        firebase_admin.initialize_app(_cred, {
+            'databaseURL': config.FIREBASE_DATABASE_URL
+        })
+        _firebase_initialized = True
+        # Lấy tham chiếu đến root của database
+        _db_ref = db.reference()
+        logging.info("Firebase Client: Firebase Admin SDK (FCM & Database) đã được khởi tạo thành công.")
+        return True
+    except ValueError as e:
+         # Bắt lỗi cụ thể nếu databaseURL không hợp lệ
+         logging.error(f"Firebase Client: Lỗi khi khởi tạo Firebase - Database URL không hợp lệ? Lỗi: {e}", exc_info=True)
+         return False
+    except Exception as e:
+        logging.error(f"Firebase Client: Lỗi không xác định khi khởi tạo Firebase Admin SDK: {e}", exc_info=True)
+        return False
 
 def send_fcm_notification(token: str, title: str, body: str, data: dict = None) -> bool:
     """
     Gửi một thông báo FCM đến một token cụ thể.
-    Args:
-        token (str): FCM token của thiết bị nhận.
-        title (str): Tiêu đề của thông báo.
-        body (str): Nội dung của thông báo.
-        data (dict, optional): Dữ liệu payload tùy chỉnh. Defaults to None.
-    Returns:
-        bool: True nếu gửi thành công (hoặc được FCM chấp nhận), False nếu có lỗi.
+    (Giữ nguyên như cũ)
     """
     if not _firebase_initialized:
         logging.warning("Firebase Client: Bỏ qua gửi FCM do Firebase Admin SDK chưa được khởi tạo.")
@@ -80,12 +87,7 @@ def send_fcm_notification(token: str, title: str, body: str, data: dict = None) 
 def send_alert_to_all(title: str, body: str, data: dict = None) -> bool:
     """
     Gửi thông báo/cảnh báo đến TẤT CẢ các token đã đăng ký.
-    Args:
-        title (str): Tiêu đề cảnh báo.
-        body (str): Nội dung cảnh báo.
-        data (dict, optional): Dữ liệu payload tùy chỉnh (ví dụ: loại cảnh báo, timestamp).
-    Returns:
-        bool: True nếu ít nhất một thông báo được gửi thành công, False nếu không có token hoặc tất cả đều lỗi.
+    (Giữ nguyên như cũ)
     """
     if not _firebase_initialized:
         logging.warning("Firebase Client: Không thể gửi cảnh báo vì Firebase chưa khởi tạo.")
@@ -117,14 +119,52 @@ def send_alert_to_all(title: str, body: str, data: dict = None) -> bool:
     # Trả về True nếu ít nhất một cái thành công
     return success_count > 0
 
+# === THÊM MỚI: Hàm ghi dữ liệu biên độ âm thanh ===
+def write_audio_level(client_ip: str, amplitude: float, timestamp: float):
+    """
+    Ghi giá trị biên độ âm thanh (RMS) mới nhất của một client lên Firebase Realtime Database.
+
+    Args:
+        client_ip (str): Địa chỉ IP của thiết bị gửi âm thanh.
+        amplitude (float): Giá trị biên độ (RMS) đã tính toán (thường trong khoảng 0-1).
+        timestamp (float): Thời gian (unix timestamp) của dữ liệu.
+    """
+    if not _firebase_initialized or _db_ref is None:
+        logging.warning("Firebase Client: Firebase DB chưa sẵn sàng, không thể ghi audio level.")
+        return
+
+    try:
+        # Tạo đường dẫn động cho từng client IP
+        # Thay thế dấu '.' bằng '-' vì Firebase key không cho phép '.'
+        safe_client_ip = client_ip.replace('.', '-')
+        path = f"audio_levels/{safe_client_ip}/latest"
+
+        # Dữ liệu cần ghi
+        data = {
+            'timestamp': timestamp,
+            'amplitude': amplitude
+        }
+
+        # Ghi dữ liệu lên Realtime Database (ghi đè giá trị cũ tại 'latest')
+        _db_ref.child(path).set(data)
+        # Log ở mức DEBUG để tránh làm đầy log
+        logging.debug(f"Firebase Client: Đã ghi audio level cho {client_ip} lên DB: {amplitude:.3f}")
+
+    except firebase_admin.exceptions.FirebaseError as e:
+        logging.error(f"Firebase Client: Lỗi Firebase DB khi ghi audio level cho {client_ip}: {e}")
+    except TypeError as e:
+         # Có thể xảy ra nếu dữ liệu không serialize được thành JSON
+         logging.error(f"Firebase Client: Lỗi TypeError khi chuẩn bị dữ liệu DB cho {client_ip}: {e}", exc_info=True)
+    except Exception as e:
+        logging.error(f"Firebase Client: Lỗi không xác định khi ghi audio level cho {client_ip}: {e}", exc_info=True)
+# ===========================================
+
 # Hàm gửi thông báo định kỳ (nếu cần) - giữ lại từ code gốc
 def _send_periodic_notifications_job():
     """Công việc gửi thông báo đến tất cả các token đã đăng ký (cho scheduler)."""
     logging.info("Firebase Client (Scheduler): Bắt đầu tác vụ gửi thông báo định kỳ...")
     title = "Thông báo định kỳ"
     body = f"Server vẫn đang chạy lúc {time.strftime('%Y-%m-%d %H:%M:%S')}"
-    # Có thể thêm data payload nếu muốn
-    # data = {"type": "periodic_check", "timestamp": str(time.time())}
     send_alert_to_all(title, body) # Sử dụng lại hàm send_alert_to_all
     logging.info("Firebase Client (Scheduler): Hoàn thành tác vụ gửi thông báo định kỳ.")
 
