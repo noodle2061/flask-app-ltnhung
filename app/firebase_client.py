@@ -1,8 +1,10 @@
+# app/firebase_client.py
 import firebase_admin
-from firebase_admin import credentials, messaging, db # Thêm 'db'
+from firebase_admin import credentials, messaging, db, firestore # Thêm 'firestore'
 import logging
 import os
 import time
+import datetime # Thêm datetime
 
 # Import cấu hình và quản lý token
 from . import config
@@ -10,11 +12,12 @@ from . import token_storage # Cần truy cập token_storage để lấy danh s�
 
 _firebase_initialized = False
 _cred = None
-_db_ref = None # Tham chiếu đến root của Realtime Database
+_db_ref = None # Tham chiếu đến root của Realtime Database (vẫn giữ nếu cần)
+_firestore_db = None # <<< THÊM MỚI: Biến lưu trữ Firestore client
 
 def initialize_firebase():
-    """Khởi tạo Firebase Admin SDK cho cả FCM và Realtime Database."""
-    global _firebase_initialized, _cred, _db_ref
+    """Khởi tạo Firebase Admin SDK cho cả FCM, RTDB (nếu cần) và Firestore."""
+    global _firebase_initialized, _cred, _db_ref, _firestore_db # <<< THÊM MỚI: _firestore_db
     if _firebase_initialized:
         logging.info("Firebase Client: Firebase Admin SDK đã được khởi tạo trước đó.")
         return True
@@ -34,22 +37,39 @@ def initialize_firebase():
             'databaseURL': config.FIREBASE_DATABASE_URL
         })
         _firebase_initialized = True
-        # Lấy tham chiếu đến root của database
-        _db_ref = db.reference()
-        logging.info("Firebase Client: Firebase Admin SDK (FCM & Database) đã được khởi tạo thành công.")
+
+        # Lấy tham chiếu đến root của Realtime database (nếu bạn vẫn dùng nó cho việc khác)
+        try:
+            _db_ref = db.reference()
+            logging.info("Firebase Client: Realtime Database reference obtained.")
+        except Exception as e:
+            logging.warning(f"Firebase Client: Could not get Realtime Database reference (may not be needed): {e}")
+            _db_ref = None
+
+        # <<< THÊM MỚI: Lấy Firestore client >>>
+        try:
+            _firestore_db = firestore.client()
+            logging.info("Firebase Client: Firestore client obtained successfully.")
+        except Exception as e:
+            logging.error(f"Firebase Client: Failed to get Firestore client: {e}", exc_info=True)
+            # Bạn có thể quyết định dừng hẳn nếu Firestore là bắt buộc
+            # return False
+        # <<< KẾT THÚC THÊM MỚI >>>
+
+        logging.info("Firebase Client: Firebase Admin SDK initialization complete.")
         return True
     except ValueError as e:
-         # Bắt lỗi cụ thể nếu databaseURL không hợp lệ
+         # Bắt lỗi cụ thể nếu databaseURL không hợp lệ?
          logging.error(f"Firebase Client: Lỗi khi khởi tạo Firebase - Database URL không hợp lệ? Lỗi: {e}", exc_info=True)
          return False
     except Exception as e:
         logging.error(f"Firebase Client: Lỗi không xác định khi khởi tạo Firebase Admin SDK: {e}", exc_info=True)
         return False
 
+# --- Hàm send_fcm_notification và send_alert_to_all giữ nguyên như cũ ---
 def send_fcm_notification(token: str, title: str, body: str, data: dict = None) -> bool:
     """
     Gửi một thông báo FCM đến một token cụ thể.
-    (Giữ nguyên như cũ)
     """
     if not _firebase_initialized:
         logging.warning("Firebase Client: Bỏ qua gửi FCM do Firebase Admin SDK chưa được khởi tạo.")
@@ -87,7 +107,6 @@ def send_fcm_notification(token: str, title: str, body: str, data: dict = None) 
 def send_alert_to_all(title: str, body: str, data: dict = None) -> bool:
     """
     Gửi thông báo/cảnh báo đến TẤT CẢ các token đã đăng ký.
-    (Giữ nguyên như cũ)
     """
     if not _firebase_initialized:
         logging.warning("Firebase Client: Không thể gửi cảnh báo vì Firebase chưa khởi tạo.")
@@ -119,47 +138,69 @@ def send_alert_to_all(title: str, body: str, data: dict = None) -> bool:
     # Trả về True nếu ít nhất một cái thành công
     return success_count > 0
 
-# === THÊM MỚI: Hàm ghi dữ liệu biên độ âm thanh ===
+# --- Hàm write_audio_level cho Realtime Database (giữ lại nếu vẫn cần) ---
 def write_audio_level(client_ip: str, amplitude: float, timestamp: float):
     """
     Ghi giá trị biên độ âm thanh (RMS) mới nhất của một client lên Firebase Realtime Database.
-
-    Args:
-        client_ip (str): Địa chỉ IP của thiết bị gửi âm thanh.
-        amplitude (float): Giá trị biên độ (RMS) đã tính toán (thường trong khoảng 0-1).
-        timestamp (float): Thời gian (unix timestamp) của dữ liệu.
     """
     if not _firebase_initialized or _db_ref is None:
-        logging.warning("Firebase Client: Firebase DB chưa sẵn sàng, không thể ghi audio level.")
+        # Giảm mức log xuống DEBUG hoặc INFO vì bạn có thể không dùng RTDB nữa
+        logging.debug("Firebase Client: Firebase RTDB chưa sẵn sàng, không thể ghi audio level.")
         return
 
     try:
-        # Tạo đường dẫn động cho từng client IP
-        # Thay thế dấu '.' bằng '-' vì Firebase key không cho phép '.'
         safe_client_ip = client_ip.replace('.', '-')
         path = f"audio_levels/{safe_client_ip}/latest"
-
-        # Dữ liệu cần ghi
         data = {
             'timestamp': timestamp,
             'amplitude': amplitude
         }
-
-        # Ghi dữ liệu lên Realtime Database (ghi đè giá trị cũ tại 'latest')
         _db_ref.child(path).set(data)
-        # Log ở mức DEBUG để tránh làm đầy log
-        logging.debug(f"Firebase Client: Đã ghi audio level cho {client_ip} lên DB: {amplitude:.3f}")
+        logging.debug(f"Firebase Client: Đã ghi audio level cho {client_ip} lên RTDB: {amplitude:.3f}")
 
     except firebase_admin.exceptions.FirebaseError as e:
-        logging.error(f"Firebase Client: Lỗi Firebase DB khi ghi audio level cho {client_ip}: {e}")
+        logging.error(f"Firebase Client: Lỗi Firebase RTDB khi ghi audio level cho {client_ip}: {e}")
     except TypeError as e:
-         # Có thể xảy ra nếu dữ liệu không serialize được thành JSON
-         logging.error(f"Firebase Client: Lỗi TypeError khi chuẩn bị dữ liệu DB cho {client_ip}: {e}", exc_info=True)
+         logging.error(f"Firebase Client: Lỗi TypeError khi chuẩn bị dữ liệu RTDB cho {client_ip}: {e}", exc_info=True)
     except Exception as e:
-        logging.error(f"Firebase Client: Lỗi không xác định khi ghi audio level cho {client_ip}: {e}", exc_info=True)
-# ===========================================
+        logging.error(f"Firebase Client: Lỗi không xác định khi ghi audio level cho {client_ip} vào RTDB: {e}", exc_info=True)
 
-# Hàm gửi thông báo định kỳ (nếu cần) - giữ lại từ code gốc
+# <<< THÊM MỚI: Hàm ghi lịch sử cảnh báo vào Firestore >>>
+def log_alert_to_firestore(client_ip: str, s3_key: str | None):
+    """Ghi lại sự kiện cảnh báo vào collection 'alert_history' trên Firestore."""
+    if not _firestore_db: # Kiểm tra xem Firestore client đã sẵn sàng chưa
+        logging.warning("Firestore client not available. Cannot log alert history.")
+        return
+
+    try:
+        # Chọn collection để lưu trữ. Nếu chưa có, Firestore sẽ tự tạo.
+        collection_ref = _firestore_db.collection('alert_history')
+
+        # Chuẩn bị dữ liệu cho document mới
+        alert_data = {
+            # Sử dụng firestore.SERVER_TIMESTAMP để Firestore tự điền thời gian phía server
+            # Điều này đảm bảo thời gian nhất quán ngay cả khi đồng hồ server Python bị lệch.
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'client_ip': client_ip,
+            # Chỉ thêm trường 's3_key' nếu nó thực sự có giá trị (không phải None)
+            # Điều này giúp tiết kiệm dung lượng và làm cho dữ liệu sạch hơn.
+        }
+        if s3_key:
+            alert_data['s3_key'] = s3_key
+
+        # Thêm document mới vào collection. Firestore sẽ tự động tạo ID duy nhất.
+        doc_ref = collection_ref.document() # Tạo tham chiếu đến document mới với ID tự sinh
+        doc_ref.set(alert_data) # Ghi dữ liệu vào document đó
+
+        # Log lại ID của document vừa tạo để tiện theo dõi (tùy chọn)
+        logging.info(f"Alert for {client_ip} logged to Firestore collection 'alert_history' with ID: {doc_ref.id}")
+
+    except Exception as e:
+        # Bắt mọi lỗi có thể xảy ra trong quá trình tương tác với Firestore
+        logging.error(f"Error logging alert to Firestore for IP {client_ip}: {e}", exc_info=True)
+# <<< KẾT THÚC THÊM MỚI >>>
+
+# --- Hàm _send_periodic_notifications_job giữ nguyên nếu cần ---
 def _send_periodic_notifications_job():
     """Công việc gửi thông báo đến tất cả các token đã đăng ký (cho scheduler)."""
     logging.info("Firebase Client (Scheduler): Bắt đầu tác vụ gửi thông báo định kỳ...")
@@ -167,4 +208,3 @@ def _send_periodic_notifications_job():
     body = f"Server vẫn đang chạy lúc {time.strftime('%Y-%m-%d %H:%M:%S')}"
     send_alert_to_all(title, body) # Sử dụng lại hàm send_alert_to_all
     logging.info("Firebase Client (Scheduler): Hoàn thành tác vụ gửi thông báo định kỳ.")
-
