@@ -1,21 +1,19 @@
 # app/udp_server.py
 import socket
-import logging # <<< Đã thêm ở lần sửa trước
-import torch   # <<< THÊM DÒNG NÀY
+import logging
+import torch
 import threading
 import time
 import io # Để xử lý byte stream trong bộ nhớ
 from collections import defaultdict, deque
 import numpy as np
-# import torch # Đã import ở trên
 import soundfile as sf # Để lưu tensor thành file WAV
 import boto3 # Để tương tác với AWS S3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 
 from . import config
 from . import ml_handler # Import module xử lý ML
-from . import firebase_client # Import module Firebase để gửi thông báo VÀ ghi DB
-# token_storage không cần import trực tiếp ở đây nữa
+from . import firebase_client # Import module Firebase để gửi thông báo VÀ ghi DB VÀ LẤY SỐ ĐT
 
 _stop_udp = threading.Event()
 
@@ -110,21 +108,30 @@ def calculate_rms(audio_chunk_tensor: torch.Tensor) -> float:
         logging.error(f"Error calculating RMS: {e}", exc_info=True)
         return 0.0
 
-def _process_audio_data(data_bytes, client_address):
+# ==============================================================================
+# <<< SỬA ĐỔI HÀM _process_audio_data >>>
+# ==============================================================================
+def _process_audio_data(data_bytes, client_address) -> str | None:
     """
     Xử lý dữ liệu audio nhận được từ một client (ESP32).
-    Tính RMS, gửi lên Firebase DB, áp dụng logic phát hiện phức tạp và gửi cảnh báo.
+    Tính RMS, gửi lên Firebase DB, áp dụng logic phát hiện phức tạp,
+    gửi cảnh báo FCM/log Firestore, VÀ trả về lệnh gọi điện nếu cần.
+
+    Returns:
+        str | None: Chuỗi lệnh "CALL:<phone_number>" nếu cần gửi lệnh gọi,
+                    None nếu không cần gửi lệnh.
     """
     global _audio_buffers, _prediction_history, _audio_chunk_history, _last_alert_times, _buffer_lock
 
     client_ip = client_address[0]
     num_bytes_received = len(data_bytes)
+    command_to_send_back = None # <<< Biến để lưu lệnh trả về
 
-    if num_bytes_received == 0: return
+    if num_bytes_received == 0: return None
     if num_bytes_received % config.AUDIO_BYTES_PER_SAMPLE != 0:
         logging.warning(f"UDP Server: From {client_ip}, received {num_bytes_received} bytes, "
                         f"not a multiple of {config.AUDIO_BYTES_PER_SAMPLE} bytes/sample. Skipping packet.")
-        return
+        return None
 
     try:
         # Chuyển đổi bytes thành numpy array rồi thành tensor float
@@ -215,45 +222,51 @@ def _process_audio_data(data_bytes, client_address):
                     # Nhả lock SAU KHI lấy dữ liệu cần thiết và cập nhật last_alert_time
                     _buffer_lock.release()
 
-                    # --- Xử lý S3 và Gửi Thông báo (ngoài lock) ---
+                    # --- Xử lý S3, Gửi Thông báo FCM, Log Firestore (ngoài lock) ---
                     audio_s3_key = None
                     audio_presigned_url = None
                     try:
+                        # <<< LOGIC S3, FCM, FIRESTORE LOG GIỮ NGUYÊN >>>
                         if audio_to_save_list:
-                            # Nối các chunk lại thành một tensor lớn
                             full_audio_tensor = torch.cat(audio_to_save_list)
-                            # Chuyển tensor thành bytes WAV
                             audio_bytes = save_tensor_to_wav_bytes(full_audio_tensor, config.AUDIO_SAMPLE_RATE)
                             if audio_bytes:
-                                 # Tải lên S3 và lấy về key + URL tạm thời
                                  audio_s3_key, audio_presigned_url = upload_audio_to_s3(audio_bytes, client_ip, current_time)
                                  if audio_s3_key: logging.info(f"Uploaded audio segment to S3 key: {audio_s3_key}")
                                  else: logging.error("Failed to upload audio segment to S3.")
                             else: logging.error("Failed to convert audio tensor to WAV bytes.")
                         else: logging.warning("No audio data found in the save window to upload.")
 
-                        # Chuẩn bị payload và gửi FCM
                         alert_title = config.HIGH_FREQUENCY_ALERT_TITLE
                         alert_body = config.HIGH_FREQUENCY_ALERT_BODY_TEMPLATE.format(total_screams_in_window, config.SCREAM_FREQUENCY_WINDOW_S, client_ip)
                         payload = {"type": "complex_scream", "ip": client_ip}
-                        if audio_presigned_url: # Gửi URL tạm thời trong FCM data
+                        if audio_presigned_url:
                             payload["audio_url"] = audio_presigned_url
-                        if audio_s3_key: # Thêm s3_key vào payload nếu muốn client biết (tùy chọn)
+                        if audio_s3_key:
                             payload["s3_key"] = audio_s3_key
 
-                        # Gửi thông báo đến tất cả client đã đăng ký
-                        success = firebase_client.send_alert_to_all(alert_title, alert_body, data=payload)
+                        success_fcm = firebase_client.send_alert_to_all(alert_title, alert_body, data=payload)
+                        firebase_client.log_alert_to_firestore(client_ip, audio_s3_key)
 
-                        # Ghi log lịch sử vào Firestore (ngay cả khi gửi FCM thất bại)
-                        firebase_client.log_alert_to_firestore(client_ip, audio_s3_key) # Truyền s3_key (có thể là None)
-
-                        if success:
+                        if success_fcm:
                             logging.info(f"Sent complex scream alert for {client_ip} to devices.")
                         else:
                             logging.error(f"Failed to send complex scream alert for {client_ip}.")
+                        # <<< KẾT THÚC LOGIC S3, FCM, FIRESTORE LOG >>>
+
+                        # --- THÊM LOGIC LẤY SỐ ĐIỆN THOẠI VÀ TẠO LỆNH GỬI VỀ ESP32 ---
+                        logging.info(f"Attempting to get default emergency phone number for {client_ip}...")
+                        default_phone_number = firebase_client.get_default_emergency_contact()
+
+                        if default_phone_number:
+                            command_to_send_back = f"CALL:{default_phone_number}"
+                            logging.info(f"Prepared command to send back to {client_ip}: {command_to_send_back}")
+                        else:
+                            logging.error(f"Could not retrieve default phone number. No CALL command will be sent to {client_ip}.")
+                        # --- KẾT THÚC LOGIC LẤY SỐ ĐT VÀ TẠO LỆNH ---
 
                     except Exception as alert_err:
-                        logging.error(f"Error during S3 upload or sending alert for {client_ip}: {alert_err}", exc_info=True)
+                        logging.error(f"Error during S3 upload, sending alert, or getting phone number for {client_ip}: {alert_err}", exc_info=True)
                     finally:
                         _buffer_lock.acquire() # Lấy lại lock sau khi xử lý xong
 
@@ -265,6 +278,7 @@ def _process_audio_data(data_bytes, client_address):
     except ValueError as e:
          # Lỗi khi chuyển đổi bytes sang numpy (ví dụ: sai dtype)
          logging.error(f"UDP Server: ValueError processing data from {client_ip}. Corrupted data or wrong dtype? {e}", exc_info=True)
+         return None # Trả về None khi có lỗi
     except Exception as e:
         # Các lỗi nghiêm trọng khác trong quá trình xử lý
         logging.error(f"UDP Server: Critical error processing data from {client_ip}: {e}", exc_info=True)
@@ -274,9 +288,20 @@ def _process_audio_data(data_bytes, client_address):
             if client_ip in _prediction_history: del _prediction_history[client_ip]
             if client_ip in _audio_chunk_history: del _audio_chunk_history[client_ip]
             if client_ip in _last_alert_times: del _last_alert_times[client_ip]
+        return None # Trả về None khi có lỗi
 
+    # Trả về lệnh cần gửi (có thể là None)
+    return command_to_send_back
+# ==============================================================================
+# <<< KẾT THÚC SỬA ĐỔI HÀM _process_audio_data >>>
+# ==============================================================================
+
+
+# ==============================================================================
+# <<< SỬA ĐỔI HÀM udp_listener >>>
+# ==============================================================================
 def udp_listener():
-    """Lắng nghe dữ liệu UDP từ các ESP32 và xử lý."""
+    """Lắng nghe dữ liệu UDP từ các ESP32, xử lý và gửi lại lệnh nếu cần."""
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -291,13 +316,25 @@ def udp_listener():
                 # Nhận dữ liệu và địa chỉ client
                 data, addr = sock.recvfrom(config.UDP_BUFFER_SIZE)
                 if data:
-                    # Gọi hàm xử lý trong cùng luồng (đơn giản nhất)
-                    _process_audio_data(data, addr)
+                    # Gọi hàm xử lý, hàm này giờ trả về lệnh cần gửi lại (hoặc None)
+                    command_to_send = _process_audio_data(data, addr)
+
+                    # <<< THÊM LOGIC GỬI LỆNH TRẢ VỀ ESP32 >>>
+                    if command_to_send:
+                        try:
+                            logging.info(f"Sending command '{command_to_send}' back to {addr}")
+                            sock.sendto(command_to_send.encode('utf-8'), addr)
+                        except OSError as send_err:
+                            logging.error(f"UDP Server: Socket OSError sending command to {addr}: {send_err}")
+                        except Exception as send_exc:
+                            logging.error(f"UDP Server: Unknown error sending command to {addr}: {send_exc}", exc_info=True)
+                    # <<< KẾT THÚC LOGIC GỬI LỆNH >>>
+
             except socket.timeout:
                 # Không nhận được gì trong 1 giây, tiếp tục vòng lặp để kiểm tra _stop_udp
                 continue
             except OSError as e:
-                 # Lỗi mạng hoặc socket
+                 # Lỗi mạng hoặc socket khi nhận
                  logging.error(f"UDP Server: Socket OSError receiving data: {e}", exc_info=True)
                  time.sleep(1) # Chờ 1 giây trước khi thử lại
             except Exception as e:
@@ -315,6 +352,10 @@ def udp_listener():
         if sock:
             sock.close()
         logging.info("UDP Server: Listener thread stopped and socket closed.")
+# ==============================================================================
+# <<< KẾT THÚC SỬA ĐỔI HÀM udp_listener >>>
+# ==============================================================================
+
 
 def start_udp_thread() -> threading.Thread:
     """Khởi tạo và bắt đầu luồng chạy UDP listener."""
